@@ -44,6 +44,7 @@ services:
       - kong-net
     restart: on-failure
 
+  # proxy & admin
   kong:
     image: "${KONG_DOCKER_TAG:-kong:3.9}"
     depends_on:
@@ -56,6 +57,11 @@ services:
       KONG_PROXY_ERROR_LOG: /dev/stderr
       KONG_PREFIX: ${KONG_PREFIX:-/var/run/kong}
       KONG_DECLARATIVE_CONFIG: "/opt/kong/kong.yaml"
+
+      KONG_ADMIN_ACCESS_LOG: /dev/stdout
+      KONG_ADMIN_ERROR_LOG: /dev/stderr
+      KONG_ADMIN_LISTEN: "${KONG_ADMIN_LISTEN:-0.0.0.0:8001}"
+      KONG_ADMIN_GUI_URL: http://localhost:8002
     secrets:
       - kong_postgres_password
     networks:
@@ -75,10 +81,11 @@ services:
     volumes:
       - ./data/kong-proxy/prefix:/var/run/kong
       - ./data/kong-proxy/tmp:/tmp
-      - ./config:/opt/kong
+      - ./config/kong.conf:/etc/kong/kong.conf
     security_opt:
       - no-new-privileges
 
+  # admin & magnager
   kong-admin:
     image: "${KONG_DOCKER_TAG:-kong:3.9}"
     depends_on:
@@ -92,6 +99,10 @@ services:
       KONG_PREFIX: ${KONG_PREFIX:-/var/run/kong}
       KONG_DECLARATIVE_CONFIG: "/opt/kong/kong.yaml"
       KONG_ADMIN_GUI_URL: http://localhost:8002
+ 
+      KONG_ADMIN_GUI_LISTEN: "${KONG_ADMIN_GUI_LISTEN:-0.0.0.0:8002}"
+      KONG_ADMIN_GUI_PATH: /
+      KONG_ADMIN_API_URI: http://localhost:8001
     secrets:
       - kong_postgres_password
     networks:
@@ -99,6 +110,7 @@ services:
     ports:
       - "8001:8001/tcp"
       - "8444:8444/tcp"
+      - "8002:8002/tcp"
     healthcheck:
       test: [ "CMD", "kong", "health" ]
       interval: 10s
@@ -109,40 +121,7 @@ services:
     volumes:
       - ./data/kong-admin/prefix:/var/run/kong
       - ./data/kong-admin/tmp:/tmp
-      - ./config:/opt/kong
-    security_opt:
-      - no-new-privileges
-
-  kong-manager:
-    depends_on:
-      - kong-admin
-    image: "${KONG_DOCKER_TAG:-kong:3.9}"
-    user: "${KONG_USER:-kong}"
-    environment:
-      <<: *kong-env
-      KONG_PREFIX: ${KONG_PREFIX:-/var/run/kong}
-      KONG_DECLARATIVE_CONFIG: "/opt/kong/kong.yaml"
-      KONG_ADMIN_GUI_LISTEN: "${KONG_ADMIN_GUI_LISTEN:-0.0.0.0:8002}"
-      KONG_ADMIN_GUI_PATH: /
-      KONG_ADMIN_GUI_URL: http://localhost:8002
-      KONG_ADMIN_API_URI: http://localhost:8001
-    secrets:
-      - kong_postgres_password
-    networks:
-      - kong-net
-    ports:
-      - "8002:8002/tcp"
-    healthcheck:
-      test: [ "CMD", "kong", "health" ]
-      interval: 10s
-      timeout: 10s
-      retries: 10
-    restart: on-failure:5
-    read_only: true
-    volumes:
-      - ./data/kong-gui/prefix:/var/run/kong
-      - ./data/kong-gui/tmp:/tmp
-      - ./config:/opt/kong
+      - ./config/kong.conf:/etc/kong/kong.conf
     security_opt:
       - no-new-privileges
 
@@ -173,8 +152,94 @@ services:
     tty: true
     networks:
       - kong-net
+    ports:
+      - "5432:5432/tcp"
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.64.0
+    restart: unless-stopped
+    ports: ["16686:16686", "4317:4317", "4318:4318"]
+    volumes:
+      - ./data/jaeger:/badger
+    mem_limit: 512m
+    environment:
+      - SPAN_STORAGE_TYPE=badger
+      - BADGER_EPHEMERAL=false
+      - BADGER_DIRECTORY_KEY=/badger/key
+      - BADGER_DIRECTORY_VALUE=/badger/data
+      - BADGER_SPAN_STORE_TTL=168h0m0s
+      - COLLECTOR_OTLP_ENABLED=true
+    user: "1000:1000"
+    networks:
+      - kong-net
+
+  loki:
+    image: grafana/loki:3.3.2
+    # image: grafana/loki:3.1.0
+    command: -config.file=/etc/loki/local-config.yaml
+    restart: unless-stopped
+    ports: ["3100:3100"]
+    mem_limit: 512m
+    volumes:
+      - ./monitoring/loki/loki.yaml:/etc/loki/local-config.yaml
+      - ./data/loki:/loki
+    user: "1000:1000"
+    networks:
+      - kong-net
+
+  prometheus:
+    image: prom/prometheus:v2.31.2
+    restart: unless-stopped
+    command: >
+      --config.file=/etc/prometheus/prometheus.yaml
+      --web.route-prefix=/
+      --storage.tsdb.path=/prometheus
+      --storage.tsdb.retention.time=30d
+      --web.enable-lifecycle
+      --web.enable-admin-api
+    ports: ["9090:9090"]
+    volumes:
+      - ./monitoring/prometheus/prometheus.yaml:/etc/prometheus/prometheus.yaml
+      - ./data/prometheus:/prometheus
+    mem_limit: 512m
+    user: "1000:1000"
+    networks:
+      - kong-net
+
+  grafana:
+    image: grafana/grafana:8.3.2
+    environment:
+      - GF_INSTALL_PLUGINS=https://storage.googleapis.com/integration-artifacts/grafana-lokiexplore-app/grafana-lokiexplore-app-latest.zip;grafana-lokiexplore-app
+    restart: unless-stopped
+    ports: ["3000:3000"]
+    volumes:
+      - ./monitoring/grafana/datasource.yaml:/etc/grafana/provisioning/datasources/monitoring.yaml
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./data/grafana:/var/lib/grafana
+    networks:
+      - kong-net
+    user: "1000:1000"
+
+  collector:
+    image: otel/opentelemetry-collector-contrib:0.116.1
+    restart: unless-stopped
+    command: --config=/conf/otel-collector.config.yaml
+    ports: ["19090:19090"]
+    volumes:
+      - ./config/otel-collector.yaml:/conf/otel-collector.config.yaml
+    networks:
+      - kong-net
+
+  debug:
+    image: lightruncom/koolkits:python
+    # 起動したままにする
+    tty: true
+    stdin_open: true
+    networks:
+      - kong-net
+
 
 secrets:
   kong_postgres_password:

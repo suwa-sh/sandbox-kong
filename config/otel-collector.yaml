@@ -1,0 +1,76 @@
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: "0.0.0.0:4318"
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: 'kong'
+          scrape_interval: 5s
+          static_configs:
+#              - targets: ['0.0.0.0:8001']
+            - targets: ['kong:8001']
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 65
+    spike_limit_percentage: 20
+  batch:
+  # resourcedetection:
+  #   detectors: [gcp]
+  #   timeout: 10s
+
+exporters:
+  otlphttp:
+    traces_endpoint: http://jaeger:4318/v1/traces
+    logs_endpoint: http://loki:3100/otlp/v1/logs
+    tls:
+      insecure: true
+  prometheus:
+    endpoint: "0.0.0.0:19090"
+    namespace: namespace-defined-by-otel-collector
+    const_labels:
+      added_by: "by-otel-collector"
+    send_timestamps: true
+    metric_expiration: 180m
+    enable_open_metrics: true
+    add_metric_suffixes: false
+    resource_to_telemetry_conversion:
+      enabled: true
+
+  debug:
+    verbosity: detailed
+    sampling_initial: 5
+    sampling_thereafter: 200
+
+service:
+  pipelines:
+    # traces:
+    #   receivers: [otlp]
+    #   processors: [memory_limiter, batch]
+    #   exporters: [googlecloud, debug]
+    # logs:
+    #   receivers: [otlp]
+    #   processors: [memory_limiter, batch]
+    #   exporters: [googlecloud, debug]
+    # metrics:
+    #   receivers: [prometheus]
+    #   processors: [memory_limiter, batch]
+    #   exporters: [googlecloud, debug]
+
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      # exporters: [otlphttp, debug]
+      exporters: [otlphttp]
+    logs:
+      receivers: [otlp]
+      exporters: [otlphttp, debug]
+      # exporters: [otlphttp]
+    metrics:
+      receivers: [prometheus]
+      processors: [memory_limiter, batch]
+      # exporters: [prometheus, debug]
+      exporters: [prometheus]
